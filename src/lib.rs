@@ -10,9 +10,9 @@
 ))]
 #![recursion_limit = "1024"]
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use errors::RustupError;
-use itertools::{chain, Itertools};
+use itertools::{Itertools, chain};
 
 #[macro_use]
 extern crate rs_tracing;
@@ -53,13 +53,9 @@ pub fn is_proxyable_tools(tool: &str) -> Result<()> {
 fn component_for_bin(binary: &str) -> Option<&'static str> {
     use std::env::consts::EXE_SUFFIX;
 
-    let binary_prefix = match binary.find(EXE_SUFFIX) {
-        _ if EXE_SUFFIX.is_empty() => binary,
-        Some(i) => &binary[..i],
-        None => binary,
-    };
+    let binary_without_suffix = binary.strip_suffix(EXE_SUFFIX).unwrap_or(binary);
 
-    match binary_prefix {
+    match binary_without_suffix {
         "rustc" | "rustdoc" => Some("rustc"),
         "cargo" => Some("cargo"),
         "rust-lldb" | "rust-gdb" | "rust-gdbgui" => Some("rustc"), // These are not always available
@@ -78,6 +74,7 @@ mod command;
 mod config;
 mod diskio;
 pub mod dist;
+mod download;
 pub mod env_var;
 pub mod errors;
 mod fallback_settings;
@@ -92,7 +89,7 @@ pub mod utils;
 
 #[cfg(test)]
 mod tests {
-    use crate::{is_proxyable_tools, DUP_TOOLS, TOOLS};
+    use crate::{DUP_TOOLS, TOOLS, is_proxyable_tools};
 
     #[test]
     fn test_is_proxyable_tools() {

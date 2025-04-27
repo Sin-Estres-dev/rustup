@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use tracing::warn;
-use tracing_subscriber::{reload::Handle, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
 
 use crate::{
     cli::{
@@ -73,7 +73,7 @@ struct RustupInit {
     dump_testament: bool,
 }
 
-#[tracing::instrument(level = "trace")]
+#[tracing::instrument(level = "trace", skip(process, console_filter))]
 pub async fn main(
     current_dir: PathBuf,
     process: &Process,

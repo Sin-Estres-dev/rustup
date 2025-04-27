@@ -31,40 +31,41 @@
 //! and racy on Windows.
 
 use std::borrow::Cow;
-use std::env::consts::EXE_SUFFIX;
+use std::env::{self, consts::EXE_SUFFIX};
+use std::fmt;
 use std::fs;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
+use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use std::{env, fmt};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use cfg_if::cfg_if;
-use clap::builder::PossibleValue;
 use clap::ValueEnum;
+use clap::builder::PossibleValue;
 use itertools::Itertools;
 use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, trace, warn};
 
+use crate::download::download_file;
 use crate::{
+    DUP_TOOLS, TOOLS,
     cli::{
-        common::{self, ignorable_error, report_error, Confirm, PackageUpdate},
+        common::{self, Confirm, PackageUpdate, ignorable_error, report_error},
         errors::*,
         markdown::md,
     },
-    config::Cfg,
+    config::{Cfg, non_empty_env_var},
     dist::{self, PartialToolchainDesc, Profile, TargetTriple, ToolchainDesc},
     errors::RustupError,
     install::UpdateStatus,
-    process::{terminalsource, Process},
+    process::{Process, terminalsource},
     toolchain::{
         DistributableToolchain, MaybeOfficialToolchainName, ResolvableToolchainName, Toolchain,
         ToolchainName,
     },
     utils::{self, Notification},
-    DUP_TOOLS, TOOLS,
 };
 
 #[cfg(unix)]
@@ -77,14 +78,17 @@ use unix::{delete_rustup_and_cargo_home, do_add_to_path, do_remove_from_path};
 #[cfg(unix)]
 pub(crate) use unix::{run_update, self_replace};
 
+#[cfg(unix)]
+use self::shell::{Nu, UnixShell};
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::complete_windows_uninstall;
+#[cfg(all(windows, feature = "test"))]
+pub use windows::{RegistryGuard, RegistryValueId, USER_PATH, get_path};
 #[cfg(windows)]
 use windows::{delete_rustup_and_cargo_home, do_add_to_path, do_remove_from_path};
-#[cfg(all(windows, feature = "test"))]
-pub use windows::{get_path, RegistryGuard, RegistryValueId, USER_PATH};
 #[cfg(windows)]
 pub(crate) use windows::{run_update, self_replace};
 
@@ -360,8 +364,8 @@ modifying the profile file{plural} located at:
 macro_rules! pre_install_msg_win {
     () => {
         pre_install_msg_template!(
-            "This path will then be added to your `PATH` environment variable by
-modifying the `HKEY_CURRENT_USER/Environment/PATH` registry key."
+            r#"This path will then be added to your `PATH` environment variable by
+modifying the `PATH` registry key at `HKEY_CURRENT_USER\Environment`."#
         )
     };
 }
@@ -384,7 +388,7 @@ the corresponding `env` file under {cargo_home}.
 This is usually done by running one of the following (note the leading DOT):
     . "{cargo_home}/env"            # For sh/bash/zsh/ash/dash/pdksh
     source "{cargo_home}/env.fish"  # For fish
-    source "{cargo_home}/env.nu"    # For nushell
+    source $"{cargo_home_nushell}/env.nu"  # For nushell
 "#
     };
 }
@@ -578,13 +582,20 @@ pub(crate) async fn install(
         format!(post_install_msg_win!(), cargo_home = cargo_home)
     };
     #[cfg(not(windows))]
+    let cargo_home_nushell = Nu.cargo_home_str(process)?;
+    #[cfg(not(windows))]
     let msg = if no_modify_path {
         format!(
             post_install_msg_unix_no_modify_path!(),
-            cargo_home = cargo_home
+            cargo_home = cargo_home,
+            cargo_home_nushell = cargo_home_nushell,
         )
     } else {
-        format!(post_install_msg_unix!(), cargo_home = cargo_home)
+        format!(
+            post_install_msg_unix!(),
+            cargo_home = cargo_home,
+            cargo_home_nushell = cargo_home_nushell,
+        )
     };
     md(&mut term, msg);
 
@@ -737,6 +748,10 @@ fn install_bins(process: &Process) -> Result<()> {
 }
 
 pub(crate) fn install_proxies(process: &Process) -> Result<()> {
+    install_proxies_with_opts(process, process.var_os("RUSTUP_HARDLINK_PROXIES").is_some())
+}
+
+fn install_proxies_with_opts(process: &Process, force_hard_links: bool) -> Result<()> {
     let bin_path = process.cargo_home()?.join("bin");
     let rustup_path = bin_path.join(format!("rustup{EXE_SUFFIX}"));
 
@@ -777,6 +792,17 @@ pub(crate) fn install_proxies(process: &Process) -> Result<()> {
         link_afterwards.push(tool_path);
     }
 
+    // Normally we attempt to symlink files first but this can be overridden
+    // by using an environment variable.
+    let link_proxy = if force_hard_links {
+        |src: &Path, dest: &Path| {
+            let _ = fs::remove_file(dest);
+            utils::hardlink_file(src, dest)
+        }
+    } else {
+        utils::symlink_or_hardlink_file
+    };
+
     for tool in DUP_TOOLS {
         let tool_path = bin_path.join(format!("{tool}{EXE_SUFFIX}"));
         if let Ok(handle) = Handle::from_path(&tool_path) {
@@ -798,18 +824,30 @@ pub(crate) fn install_proxies(process: &Process) -> Result<()> {
             // previous file, and if it's not equivalent to anything then it's
             // pretty likely that it needs to be dealt with manually.
             if tool_handles.iter().all(|h| *h != handle) {
-                warn!("tool `{}` is already installed, remove it from `{}`, then run `rustup update` \
+                warn!(
+                    "tool `{}` is already installed, remove it from `{}`, then run `rustup update` \
                        to have rustup manage this tool.",
-                      tool, bin_path.display());
+                    tool,
+                    bin_path.display()
+                );
                 continue;
             }
         }
-        utils::symlink_or_hardlink_file(&rustup_path, &tool_path)?;
+        link_proxy(&rustup_path, &tool_path)?;
     }
 
     drop(tool_handles);
     for path in link_afterwards {
-        utils::symlink_or_hardlink_file(&rustup_path, &path)?;
+        link_proxy(&rustup_path, &path)?;
+    }
+
+    if !force_hard_links {
+        // Verify that the proxies are reachable.
+        // This may fail for symlinks in some circumstances.
+        let path = bin_path.join(format!("{tool}{EXE_SUFFIX}", tool = TOOLS[0]));
+        if fs::File::open(path).is_err() {
+            return install_proxies_with_opts(process, true);
+        }
     }
 
     Ok(())
@@ -1048,13 +1086,8 @@ fn get_and_parse_new_rustup_version(path: &Path) -> Option<String> {
 }
 
 fn get_new_rustup_version(path: &Path) -> Option<String> {
-    match Command::new(path).arg("--version").output() {
-        Err(_) => None,
-        Ok(output) => match String::from_utf8(output.stdout) {
-            Ok(version) => Some(version),
-            Err(_) => None,
-        },
-    }
+    let output = Command::new(path).arg("--version").output().ok()?;
+    String::from_utf8(output.stdout).ok()
 }
 
 fn parse_new_rustup_version(version: String) -> String {
@@ -1106,7 +1139,12 @@ pub(crate) async fn prepare_update(process: &Process) -> Result<Option<PathBuf>>
 
     // Get available version
     info!("checking for self-update");
-    let available_version = get_available_rustup_version(process).await?;
+    let available_version = if let Some(ver) = non_empty_env_var("RUSTUP_VERSION", process)? {
+        info!("`RUSTUP_VERSION` has been set to `{ver}`");
+        ver
+    } else {
+        get_available_rustup_version(process).await?
+    };
 
     // If up-to-date
     if available_version == current_version {
@@ -1121,7 +1159,7 @@ pub(crate) async fn prepare_update(process: &Process) -> Result<Option<PathBuf>>
 
     // Download new version
     info!("downloading self-update");
-    utils::download_file(&download_url, &setup_path, None, &|_| (), process).await?;
+    download_file(&download_url, &setup_path, None, &|_| (), process).await?;
 
     // Mark as executable
     utils::make_executable(&setup_path)?;
@@ -1140,7 +1178,7 @@ async fn get_available_rustup_version(process: &Process) -> Result<String> {
     let release_file_url = format!("{update_root}/release-stable.toml");
     let release_file_url = utils::parse_url(&release_file_url)?;
     let release_file = tempdir.path().join("release-stable.toml");
-    utils::download_file(&release_file_url, &release_file, None, &|_| (), process).await?;
+    download_file(&release_file_url, &release_file, None, &|_| (), process).await?;
     let release_toml_str = utils::read_file("rustup release", &release_file)?;
     let release_toml = toml::from_str::<RustupManifest>(&release_toml_str)
         .context("unable to parse rustup release file")?;
@@ -1232,7 +1270,7 @@ mod tests {
     use crate::cli::common;
     use crate::cli::self_update::InstallOpts;
     use crate::dist::{PartialToolchainDesc, Profile};
-    use crate::test::{test_dir, with_rustup_home, Env};
+    use crate::test::{Env, test_dir, with_rustup_home};
     use crate::{for_host, process::TestProcess};
 
     #[test]

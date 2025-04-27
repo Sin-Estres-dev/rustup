@@ -4,9 +4,9 @@ use std::{
     collections::HashSet, env, fmt, io::Write, ops::Deref, path::Path, str::FromStr, sync::LazyLock,
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
-use clap::{builder::PossibleValue, ValueEnum};
+use clap::{ValueEnum, builder::PossibleValue};
 use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use thiserror::Error as ThisError;
 use tracing::{info, warn};
 
 use crate::{
-    config::{dist_root_server, Cfg},
+    config::{Cfg, dist_root_server},
     errors::RustupError,
     process::Process,
     toolchain::ToolchainName,
@@ -57,7 +57,9 @@ fn components_missing_msg(cs: &[Component], manifest: &ManifestV2, toolchain: &s
     let mut buf = vec![];
 
     match cs {
-        [] => panic!("`components_missing_msg` should not be called with an empty collection of unavailable components"),
+        [] => panic!(
+            "`components_missing_msg` should not be called with an empty collection of unavailable components"
+        ),
         [c] => {
             let _ = writeln!(
                 buf,
@@ -110,9 +112,10 @@ You can find the list of removed components at
 <https://rust-lang.github.io/rustup/devel/concepts/components.html#previous-components>.
 
 If you are updating an existing toolchain, after determining the deprecated component(s)
-in question, please remove them with a command such as:
+and/or target(s) in question, please remove them with:
 
     rustup component remove --toolchain {toolchain} <COMPONENT>...
+    rustup target remove --toolchain {toolchain} <TARGET>...
 
 After that, you should be able to continue with the update as usual.",
         );
@@ -264,6 +267,10 @@ const TRIPLE_AARCH64_UNKNOWN_LINUX: &str = "aarch64-unknown-linux-musl";
 const TRIPLE_LOONGARCH64_UNKNOWN_LINUX: &str = "loongarch64-unknown-linux-gnu";
 #[cfg(all(not(windows), target_env = "musl"))]
 const TRIPLE_LOONGARCH64_UNKNOWN_LINUX: &str = "loongarch64-unknown-linux-musl";
+#[cfg(all(not(windows), not(target_env = "musl")))]
+const TRIPLE_POWERPC64LE_UNKNOWN_LINUX: &str = "powerpc64le-unknown-linux-gnu";
+#[cfg(all(not(windows), target_env = "musl"))]
+const TRIPLE_POWERPC64LE_UNKNOWN_LINUX: &str = "powerpc64le-unknown-linux-musl";
 
 // MIPS platforms don't indicate endianness in uname, however binaries only
 // run on boxes with the same endianness, as expected.
@@ -333,10 +340,9 @@ impl FromStr for ParsedToolchainDesc {
             }
         });
 
-        if let Some(d) = d {
-            Ok(d)
-        } else {
-            Err(RustupError::InvalidToolchainName(desc.to_string()).into())
+        match d {
+            Some(d) => Ok(d),
+            None => Err(RustupError::InvalidToolchainName(desc.to_string()).into()),
         }
     }
 }
@@ -416,10 +422,10 @@ impl TargetTriple {
             /// it is only available on Windows 10 1511+, so we use `GetProcAddress`
             /// to maintain backward compatibility with older Windows versions.
             fn arch_primary() -> Option<&'static str> {
-                use windows_sys::core::s;
                 use windows_sys::Win32::Foundation::{BOOL, HANDLE};
                 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
                 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+                use windows_sys::core::s;
 
                 const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
                 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
@@ -516,6 +522,7 @@ impl TargetTriple {
                     TRIPLE_AARCH64_UNKNOWN_LINUX
                 }),
                 (b"Linux", b"loongarch64") => Some(TRIPLE_LOONGARCH64_UNKNOWN_LINUX),
+                (b"Linux", b"ppc64le") => Some(TRIPLE_POWERPC64LE_UNKNOWN_LINUX),
                 (b"Darwin", b"x86_64") => Some("x86_64-apple-darwin"),
                 (b"Darwin", b"i686") => Some("i686-apple-darwin"),
                 (b"FreeBSD", b"x86_64") => Some("x86_64-unknown-freebsd"),
@@ -766,6 +773,59 @@ impl FromStr for Profile {
                 Self::value_variants().iter().join(", ")
             ))),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutoInstallMode {
+    #[default]
+    Enable,
+    Disable,
+}
+
+impl AutoInstallMode {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+        }
+    }
+}
+
+impl ValueEnum for AutoInstallMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Enable, Self::Disable]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(self.as_str()))
+    }
+
+    fn from_str(input: &str, _: bool) -> Result<Self, String> {
+        <Self as FromStr>::from_str(input).map_err(|e| e.to_string())
+    }
+}
+
+impl FromStr for AutoInstallMode {
+    type Err = anyhow::Error;
+
+    fn from_str(mode: &str) -> Result<Self> {
+        match mode {
+            "enable" => Ok(Self::Enable),
+            "disable" => Ok(Self::Disable),
+            _ => Err(anyhow!(format!(
+                "unknown auto install mode: '{}'; valid modes are {}",
+                mode,
+                Self::value_variants().iter().join(", ")
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for AutoInstallMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1195,10 +1255,14 @@ pub(crate) async fn dl_v2_manifest(
 
                 let server = dist_root_server(download.process)?;
                 if server == DEFAULT_DIST_SERVER {
-                    info!("this is likely due to an ongoing update of the official release server, please try again later");
+                    info!(
+                        "this is likely due to an ongoing update of the official release server, please try again later"
+                    );
                     info!("see <https://github.com/rust-lang/rustup/issues/3390> for more details");
                 } else {
-                    info!("this might indicate an issue with the third-party release server '{server}'");
+                    info!(
+                        "this might indicate an issue with the third-party release server '{server}'"
+                    );
                     info!("see <https://github.com/rust-lang/rustup/issues/3885> for more details");
                 }
             }

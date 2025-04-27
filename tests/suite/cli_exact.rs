@@ -3,9 +3,9 @@
 
 use rustup::for_host;
 use rustup::test::{
-    mock::clitools::{self, set_current_dist_date, CliTestContext, Scenario},
-    this_host_triple,
+    CROSS_ARCH1, CROSS_ARCH2, CliTestContext, MULTI_ARCH1, Scenario, this_host_triple,
 };
+use rustup::utils::raw;
 
 #[tokio::test]
 async fn update_once() {
@@ -609,8 +609,8 @@ async fn list_targets() {
     let trip = this_host_triple();
     let mut sorted = [
         format!("{} (installed)", &*trip),
-        format!("{} (installed)", clitools::CROSS_ARCH1),
-        clitools::CROSS_ARCH2.to_string(),
+        format!("{} (installed)", CROSS_ARCH1),
+        CROSS_ARCH2.to_string(),
     ];
     sorted.sort();
 
@@ -618,7 +618,7 @@ async fn list_targets() {
 
     cx.config.expect_ok(&["rustup", "default", "nightly"]).await;
     cx.config
-        .expect_ok(&["rustup", "target", "add", clitools::CROSS_ARCH1])
+        .expect_ok(&["rustup", "target", "add", CROSS_ARCH1])
         .await;
     cx.config
         .expect_ok_ex(&["rustup", "target", "list"], &expected, r"")
@@ -629,18 +629,14 @@ async fn list_targets() {
 async fn list_targets_quiet() {
     let mut cx = CliTestContext::new(Scenario::SimpleV2).await;
     let trip = this_host_triple();
-    let mut sorted = [
-        trip,
-        clitools::CROSS_ARCH1.to_string(),
-        clitools::CROSS_ARCH2.to_string(),
-    ];
+    let mut sorted = [trip, CROSS_ARCH1.to_string(), CROSS_ARCH2.to_string()];
     sorted.sort();
 
     let expected = format!("{}\n{}\n{}\n", sorted[0], sorted[1], sorted[2]);
 
     cx.config.expect_ok(&["rustup", "default", "nightly"]).await;
     cx.config
-        .expect_ok(&["rustup", "target", "add", clitools::CROSS_ARCH1])
+        .expect_ok(&["rustup", "target", "add", CROSS_ARCH1])
         .await;
     cx.config
         .expect_ok_ex(&["rustup", "target", "list", "--quiet"], &expected, r"")
@@ -651,21 +647,17 @@ async fn list_targets_quiet() {
 async fn list_installed_targets() {
     let mut cx = CliTestContext::new(Scenario::SimpleV2).await;
     let trip = this_host_triple();
-    let mut sorted = [
-        trip,
-        clitools::CROSS_ARCH1.to_string(),
-        clitools::CROSS_ARCH2.to_string(),
-    ];
+    let mut sorted = [trip, CROSS_ARCH1.to_string(), CROSS_ARCH2.to_string()];
     sorted.sort();
 
     let expected = format!("{}\n{}\n{}\n", sorted[0], sorted[1], sorted[2]);
 
     cx.config.expect_ok(&["rustup", "default", "nightly"]).await;
     cx.config
-        .expect_ok(&["rustup", "target", "add", clitools::CROSS_ARCH1])
+        .expect_ok(&["rustup", "target", "add", CROSS_ARCH1])
         .await;
     cx.config
-        .expect_ok(&["rustup", "target", "add", clitools::CROSS_ARCH2])
+        .expect_ok(&["rustup", "target", "add", CROSS_ARCH2])
         .await;
     cx.config
         .expect_ok_ex(&["rustup", "target", "list", "--installed"], &expected, r"")
@@ -679,13 +671,13 @@ async fn cross_install_indicates_target() {
     // TODO error 'nightly-x86_64-apple-darwin' is not installed
     cx.config
         .expect_ok_ex(
-            &["rustup", "target", "add", clitools::CROSS_ARCH1],
+            &["rustup", "target", "add", CROSS_ARCH1],
             r"",
             &format!(
                 r"info: downloading component 'rust-std' for '{0}'
 info: installing component 'rust-std' for '{0}'
 ",
-                clitools::CROSS_ARCH1
+                CROSS_ARCH1
             ),
         )
         .await;
@@ -696,12 +688,41 @@ info: installing component 'rust-std' for '{0}'
 async fn show_suggestion_for_missing_toolchain() {
     let cx = CliTestContext::new(Scenario::SimpleV2).await;
     cx.config
-        .expect_err_ex(
+        .expect_err_env(
             &["cargo", "+nightly", "fmt"],
-            r"",
+            &[("RUSTUP_AUTO_INSTALL", "0")],
             for_host!(
                 r"error: toolchain 'nightly-{0}' is not installed
 help: run `rustup toolchain install nightly-{0}` to install it
+"
+            ),
+        )
+        .await;
+}
+
+// issue #4212
+#[tokio::test]
+async fn show_suggestion_for_missing_toolchain_with_components() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    let cwd = cx.config.current_dir();
+    let toolchain_file = cwd.join("rust-toolchain.toml");
+    raw::write_file(
+        &toolchain_file,
+        r#"
+[toolchain]
+channel = "stable"
+components = [ "rust-src" ]
+"#,
+    )
+    .unwrap();
+    cx.config
+        .expect_err_env(
+            &["cargo", "fmt"],
+            &[("RUSTUP_AUTO_INSTALL", "0")],
+            for_host!(
+                r"error: toolchain 'stable-{0}' is not installed
+help: run `rustup toolchain install` to install it
 "
             ),
         )
@@ -734,17 +755,17 @@ async fn install_by_version_number() {
 async fn install_unreleased_component() {
     let mut cx = CliTestContext::new(Scenario::MissingComponentMulti).await;
     // Initial channel content is host + rls + multiarch-std
-    set_current_dist_date(&cx.config, "2019-09-12");
+    cx.config.set_current_dist_date("2019-09-12");
     cx.config.expect_ok(&["rustup", "default", "nightly"]).await;
     cx.config
         .expect_ok(&["rustup", "component", "add", "rls"])
         .await;
     cx.config
-        .expect_ok(&["rustup", "target", "add", clitools::MULTI_ARCH1])
+        .expect_ok(&["rustup", "target", "add", MULTI_ARCH1])
         .await;
 
     // Next channel variant should have host + rls but not multiarch-std
-    set_current_dist_date(&cx.config, "2019-09-13");
+    cx.config.set_current_dist_date("2019-09-13");
     cx.config
         .expect_ok_ex(
             &["rustup", "update", "nightly"],
@@ -761,13 +782,13 @@ info: skipping nightly which is missing installed component 'rust-std-{1}'
 info: syncing channel updates for 'nightly-2019-09-12-{0}'
 ",
                 this_host_triple(),
-                clitools::MULTI_ARCH1
+                MULTI_ARCH1
             ),
         )
         .await;
 
     // Next channel variant should have host + multiarch-std but have rls missing
-    set_current_dist_date(&cx.config, "2019-09-14");
+    cx.config.set_current_dist_date("2019-09-14");
     cx.config
         .expect_ok_ex(
             &["rustup", "update", "nightly"],
@@ -787,7 +808,7 @@ info: skipping nightly which is missing installed component 'rust-std-{1}'
 info: syncing channel updates for 'nightly-2019-09-12-{0}'
 ",
                 this_host_triple(),
-                clitools::MULTI_ARCH1,
+                MULTI_ARCH1,
             ),
         )
         .await;

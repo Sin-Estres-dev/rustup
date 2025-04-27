@@ -10,22 +10,22 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{cmp, env};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use git_testament::{git_testament, render_testament};
 use tracing::{debug, error, info, trace, warn};
-use tracing_subscriber::{reload::Handle, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
 
 use super::self_update;
 use crate::{
     cli::download_tracker::DownloadTracker,
     config::Cfg,
     dist::{
-        manifest::ComponentStatus, notifications as dist_notifications, TargetTriple, ToolchainDesc,
+        TargetTriple, ToolchainDesc, manifest::ComponentStatus, notifications as dist_notifications,
     },
     errors::RustupError,
     install::UpdateStatus,
     notifications::Notification,
-    process::{terminalsource, Process},
+    process::{Process, terminalsource},
     toolchain::{DistributableToolchain, LocalToolchainName, Toolchain, ToolchainName},
     utils::{self, notifications as util_notifications, notify::NotificationLevel},
 };
@@ -177,7 +177,7 @@ impl Notifier {
     }
 }
 
-#[tracing::instrument(level = "trace")]
+#[tracing::instrument(level = "trace", skip(process))]
 pub(crate) fn set_globals(current_dir: PathBuf, quiet: bool, process: &Process) -> Result<Cfg<'_>> {
     let notifier = Notifier::new(quiet, process);
     Cfg::from_env(current_dir, Arc::new(move |n| notifier.handle(n)), process)
@@ -406,7 +406,7 @@ pub(super) fn list_items(
     Ok(utils::ExitCode(0))
 }
 
-pub(crate) fn list_toolchains(
+pub(crate) async fn list_toolchains(
     cfg: &Cfg<'_>,
     verbose: bool,
     quiet: bool,
@@ -418,7 +418,7 @@ pub(crate) fn list_toolchains(
         let default_toolchain_name = cfg.get_default()?;
         let active_toolchain_name: Option<ToolchainName> =
             if let Ok(Some((LocalToolchainName::Named(toolchain), _reason))) =
-                cfg.find_active_toolchain()
+                cfg.maybe_ensure_active_toolchain(None).await
             {
                 Some(toolchain)
             } else {
@@ -654,7 +654,9 @@ pub(crate) fn warn_if_host_is_emulated(process: &Process) {
             "Rustup is not running natively. It's running under emulation of {}.",
             TargetTriple::from_host_or_build(process)
         );
-        warn!("For best compatibility and performance you should reinstall rustup for your native CPU.");
+        warn!(
+            "For best compatibility and performance you should reinstall rustup for your native CPU."
+        );
     }
 }
 

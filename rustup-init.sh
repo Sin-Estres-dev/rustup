@@ -33,7 +33,7 @@ RUSTUP_QUIET=no
 # NOTICE: If you change anything here, please make the same changes in setup_mode.rs
 usage() {
     cat <<EOF
-rustup-init 1.28.0 (b6fdf2fa8 2024-11-25)
+rustup-init 1.28.2 (4edd08e3f 2025-04-13)
 
 The installer for rustup
 
@@ -87,7 +87,15 @@ main() {
             ;;
     esac
 
-    local _url="${RUSTUP_UPDATE_ROOT}/dist/${_arch}/rustup-init${_ext}"
+    local _url
+    if [ "${RUSTUP_VERSION+set}" = 'set' ]; then
+        say "\`RUSTUP_VERSION\` has been set to \`${RUSTUP_VERSION}\`"
+        _url="${RUSTUP_UPDATE_ROOT}/archive/${RUSTUP_VERSION}"
+    else
+        _url="${RUSTUP_UPDATE_ROOT}/dist"
+    fi
+    _url="${_url}/${_arch}/rustup-init${_ext}"
+
 
     local _dir
     if ! _dir="$(ensure mktemp -d)"; then
@@ -857,4 +865,13 @@ get_strong_ciphersuites_for() {
     fi
 }
 
-main "$@" || exit 1
+set +u
+case "$RUSTUP_INIT_SH_PRINT" in
+    arch | architecture)
+        get_architecture || exit 1
+        echo "$RETVAL"
+        ;;
+    *)
+        main "$@" || exit 1
+        ;;
+esac

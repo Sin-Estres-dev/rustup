@@ -11,20 +11,25 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use url::Url;
 
 use crate::{
     dist::{
+        DEFAULT_DIST_SERVER, Notification, Profile, TargetTriple, ToolchainDesc,
         download::DownloadCfg,
         manifest::{Component, Manifest},
         manifestation::{Changes, Manifestation, UpdateStatus},
         prefix::InstallPrefix,
-        temp, Notification, Profile, TargetTriple, ToolchainDesc, DEFAULT_DIST_SERVER,
+        temp,
     },
+    download::download_file,
     errors::RustupError,
     process::TestProcess,
-    test::mock::{dist::*, MockComponentBuilder, MockFile, MockInstallerBuilder},
+    test::{
+        dist::*,
+        mock::{MockComponentBuilder, MockFile, MockInstallerBuilder},
+    },
     utils::{self, raw as utils_raw},
 };
 
@@ -491,7 +496,7 @@ impl TestContext {
         // Download the dist manifest and place it into the installation prefix
         let manifest_url = make_manifest_url(&self.url, &self.toolchain)?;
         let manifest_file = self.tmp_cx.new_file()?;
-        utils::download_file(&manifest_url, &manifest_file, None, &|_| {}, dl_cfg.process).await?;
+        download_file(&manifest_url, &manifest_file, None, &|_| {}, dl_cfg.process).await?;
         let manifest_str = utils::read_file("manifest", &manifest_file)?;
         let manifest = Manifest::parse(&manifest_str)?;
 

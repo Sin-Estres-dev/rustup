@@ -12,8 +12,8 @@ use url::Url;
 
 use crate::{
     dist::{
-        manifest::{Component, Manifest},
         Channel, TargetTriple, ToolchainDesc,
+        manifest::{Component, Manifest},
     },
     toolchain::{PathBasedToolchainName, ToolchainName},
 };
@@ -98,12 +98,16 @@ pub enum RustupError {
     #[error(
         "toolchain '{name}' is not installed{}",
         if let ToolchainName::Official(t) = name {
-            format!("\nhelp: run `rustup toolchain install {t}` to install it")
+            let t = if *is_active { "" } else { &format!(" {t}") };
+            format!("\nhelp: run `rustup toolchain install{t}` to install it")
         } else {
             String::new()
         },
     )]
-    ToolchainNotInstalled { name: ToolchainName },
+    ToolchainNotInstalled {
+        name: ToolchainName,
+        is_active: bool,
+    },
     #[error("path '{0}' not found")]
     PathToolchainNotInstalled(PathBasedToolchainName),
     #[error(
@@ -165,7 +169,9 @@ fn suggest_message(suggestion: &Option<String>) -> String {
 fn component_unavailable_msg(cs: &[Component], manifest: &Manifest, toolchain: &str) -> String {
     let mut buf = vec![];
     match cs {
-        [] => panic!("`component_unavailable_msg` should not be called with an empty collection of unavailable components"),
+        [] => panic!(
+            "`component_unavailable_msg` should not be called with an empty collection of unavailable components"
+        ),
         [c] => {
             let _ = writeln!(
                 buf,

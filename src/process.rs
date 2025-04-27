@@ -18,7 +18,10 @@ use tracing::subscriber::DefaultGuard;
 #[cfg(feature = "test")]
 use tracing_subscriber::util::SubscriberInitExt;
 #[cfg(feature = "test")]
-use tracing_subscriber::{reload::Handle, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
+
+#[cfg(all(feature = "test", feature = "otel"))]
+use crate::cli::log;
 
 pub mod filesource;
 pub mod terminalsource;
@@ -180,7 +183,10 @@ impl Default for OsProcess {
 pub struct TestProcess {
     pub process: Process,
     pub console_filter: Handle<EnvFilter, Registry>,
-    _guard: DefaultGuard, // guard is dropped at the end of the test
+    // These guards are dropped _in order_ at the end of the test.
+    #[cfg(feature = "otel")]
+    _telemetry_guard: log::GlobalTelemetryGuard,
+    _tracing_guard: DefaultGuard,
 }
 
 #[cfg(feature = "test")]
@@ -237,7 +243,9 @@ impl From<TestContext> for TestProcess {
         Self {
             process: inner,
             console_filter,
-            _guard: tracing_subscriber.set_default(),
+            #[cfg(feature = "otel")]
+            _telemetry_guard: log::set_global_telemetry(),
+            _tracing_guard: tracing_subscriber.set_default(),
         }
     }
 }

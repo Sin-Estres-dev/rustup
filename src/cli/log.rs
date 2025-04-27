@@ -3,15 +3,16 @@ use std::{fmt, io::Write};
 #[cfg(feature = "otel")]
 use opentelemetry_sdk::trace::Tracer;
 use termcolor::{Color, ColorSpec, WriteColor};
-use tracing::{level_filters::LevelFilter, Event, Subscriber};
+use tracing::{Event, Subscriber, level_filters::LevelFilter};
 use tracing_subscriber::{
+    EnvFilter, Layer, Registry,
     fmt::{
-        format::{self, FormatEvent, FormatFields},
         FmtContext,
+        format::{self, FormatEvent, FormatFields},
     },
     layer::SubscriberExt,
     registry::LookupSpan,
-    reload, EnvFilter, Layer, Registry,
+    reload,
 };
 
 use crate::{process::Process, utils::notify::NotificationLevel};
@@ -19,7 +20,7 @@ use crate::{process::Process, utils::notify::NotificationLevel};
 pub fn tracing_subscriber(
     process: &Process,
 ) -> (
-    impl tracing::Subscriber,
+    impl tracing::Subscriber + use<>,
     reload::Handle<EnvFilter, Registry>,
 ) {
     #[cfg(feature = "otel")]
@@ -44,7 +45,7 @@ pub fn tracing_subscriber(
 /// When the `RUSTUP_LOG` environment variable is present, a standard [`tracing_subscriber`]
 /// formatter will be used according to the filtering directives set in its value.
 /// Otherwise, this logger will use [`EventFormatter`] to mimic "classic" Rustup `stderr` output.
-fn console_logger<S>(process: &Process) -> (impl Layer<S>, reload::Handle<EnvFilter, S>)
+fn console_logger<S>(process: &Process) -> (impl Layer<S> + use<S>, reload::Handle<EnvFilter, S>)
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
@@ -128,7 +129,7 @@ impl NotificationLevel {
 /// A [`tracing::Subscriber`] [`Layer`][`tracing_subscriber::Layer`] that corresponds to Rustup's
 /// optional `opentelemetry` (a.k.a. `otel`) feature.
 #[cfg(feature = "otel")]
-fn telemetry<S>(process: &Process) -> impl Layer<S>
+fn telemetry<S>(process: &Process) -> impl Layer<S> + use<S>
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
@@ -152,12 +153,11 @@ where
 fn telemetry_default_tracer() -> Tracer {
     use std::time::Duration;
 
-    use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
+    use opentelemetry::{global, trace::TracerProvider as _};
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::{
-        runtime::Tokio,
-        trace::{Sampler, TracerProvider},
         Resource,
+        trace::{Sampler, SdkTracerProvider},
     };
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -166,12 +166,36 @@ fn telemetry_default_tracer() -> Tracer {
         .build()
         .unwrap();
 
-    let provider = TracerProvider::builder()
+    let provider = SdkTracerProvider::builder()
         .with_sampler(Sampler::AlwaysOn)
-        .with_resource(Resource::new(vec![KeyValue::new("service.name", "rustup")]))
-        .with_batch_exporter(exporter, Tokio)
+        .with_resource(Resource::builder().with_service_name("rustup").build())
+        .with_batch_exporter(exporter)
         .build();
 
     global::set_tracer_provider(provider.clone());
     provider.tracer("tracing-otel-subscriber")
+}
+
+#[cfg(feature = "otel")]
+#[must_use]
+pub struct GlobalTelemetryGuard {
+    _private: (),
+}
+
+#[cfg(feature = "otel")]
+pub fn set_global_telemetry() -> GlobalTelemetryGuard {
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+    GlobalTelemetryGuard { _private: () }
+}
+
+#[cfg(feature = "otel")]
+impl Drop for GlobalTelemetryGuard {
+    fn drop(&mut self) {
+        // We're tracing, so block until all spans are exported.
+        opentelemetry::global::set_tracer_provider(
+            opentelemetry::trace::noop::NoopTracerProvider::new(),
+        );
+    }
 }

@@ -157,6 +157,8 @@ impl<'a> LineFormatter<'a> {
             Tag::Link { .. } => {}
             Tag::Image { .. } => {}
             Tag::FootnoteDefinition(_name) => {}
+            Tag::Superscript => {}
+            Tag::Subscript => {}
         }
     }
 
@@ -193,10 +195,12 @@ impl<'a> LineFormatter<'a> {
             }
             TagEnd::Strong => {}
             TagEnd::Strikethrough => {}
-            TagEnd::Link { .. } => {}
-            TagEnd::Image { .. } => {} // shouldn't happen, handled in start
+            TagEnd::Link => {}
+            TagEnd::Image => {} // shouldn't happen, handled in start
             TagEnd::FootnoteDefinition => {}
             TagEnd::MetadataBlock(_) => {}
+            TagEnd::Superscript => {}
+            TagEnd::Subscript => {}
         }
     }
 

@@ -15,15 +15,16 @@
 
 use std::process::ExitCode;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use cfg_if::cfg_if;
 // Public macros require availability of the internal symbols
 use rs_tracing::{
     close_trace_file, close_trace_file_internal, open_trace_file, trace_to_file_internal,
 };
-use tracing_subscriber::{reload::Handle, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, reload::Handle};
 
 use rustup::cli::common;
+use rustup::cli::log;
 use rustup::cli::proxy_mode;
 use rustup::cli::rustup_mode;
 #[cfg(windows)]
@@ -41,16 +42,14 @@ async fn main() -> Result<ExitCode> {
     pre_rustup_main_init();
 
     let process = Process::os();
-    #[cfg(feature = "otel")]
-    opentelemetry::global::set_text_map_propagator(
-        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
-    );
-    let (subscriber, console_filter) = rustup::cli::log::tracing_subscriber(&process);
-    tracing::subscriber::set_global_default(subscriber)?;
-    let result = run_rustup(&process, console_filter).await;
-    // We're tracing, so block until all spans are exported.
-    #[cfg(feature = "otel")]
-    opentelemetry::global::shutdown_tracer_provider();
+    let result = {
+        #[cfg(feature = "otel")]
+        let _telemetry_guard = log::set_global_telemetry();
+        tracing_log::LogTracer::init()?;
+        let (subscriber, console_filter) = log::tracing_subscriber(&process);
+        tracing::subscriber::set_global_default(subscriber)?;
+        run_rustup(&process, console_filter).await
+    };
 
     match result {
         Err(e) => {
@@ -61,7 +60,7 @@ async fn main() -> Result<ExitCode> {
     }
 }
 
-#[tracing::instrument(level = "trace")]
+#[tracing::instrument(level = "trace", skip_all)]
 async fn run_rustup(
     process: &Process,
     console_filter: Handle<EnvFilter, Registry>,
@@ -76,7 +75,7 @@ async fn run_rustup(
     result
 }
 
-#[tracing::instrument(level = "trace", err(level = "trace"))]
+#[tracing::instrument(level = "trace", err(level = "trace"), skip_all)]
 async fn run_rustup_inner(
     process: &Process,
     console_filter: Handle<EnvFilter, Registry>,
@@ -145,7 +144,7 @@ fn do_recursion_guard(process: &Process) -> Result<()> {
 #[cfg(windows)]
 pub fn pre_rustup_main_init() {
     use windows_sys::Win32::System::LibraryLoader::{
-        SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32,
+        LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
     };
     // Default to loading delay loaded DLLs from the system directory.
     // For DLLs loaded at load time, this relies on the `delayload` linker flag.
